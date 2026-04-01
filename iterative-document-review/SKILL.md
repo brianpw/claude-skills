@@ -19,37 +19,49 @@ Systematically review a document through repeated passes, fixing ALL issues foun
 
 ## Process
 
+Review passes run as **subagents**; the main conversation coordinates the loop and handles user interaction.
+
 ```dot
 digraph review_loop {
-    "Document provided" [shape=doublecircle];
-    "Read full document for context" [shape=box];
-    "Run review pass (all categories)" [shape=box];
-    "Classify all findings by severity" [shape=box];
-    "Critical, High, or Medium found?" [shape=diamond];
-    "Auto-fix what you can" [shape=box];
-    "Findings needing user input?" [shape=diamond];
-    "Batch questions and ask user" [shape=box];
-    "Apply user answers as fixes" [shape=box];
-    "Max passes reached?" [shape=diamond];
-    "Run next review pass" [shape=box];
-    "Generate final report" [shape=box];
-    "Present report to user" [shape=doublecircle];
+    subgraph cluster_main {
+        label="MAIN CONVERSATION";
+        "Document provided" [shape=doublecircle];
+        "Dispatch review subagent" [shape=box];
+        "Receive subagent results" [shape=box];
+        "Questions returned?" [shape=diamond];
+        "Ask user via AskUserQuestion" [shape=box];
+        "Max passes reached?" [shape=diamond];
+        "Dispatch next subagent (with answers)" [shape=box];
+        "Compile final report from all pass data" [shape=box];
+        "Present report to user" [shape=doublecircle];
+    }
 
-    "Document provided" -> "Read full document for context";
-    "Read full document for context" -> "Run review pass (all categories)";
-    "Run review pass (all categories)" -> "Classify all findings by severity";
-    "Classify all findings by severity" -> "Critical, High, or Medium found?";
-    "Critical, High, or Medium found?" -> "Auto-fix what you can" [label="yes"];
-    "Auto-fix what you can" -> "Findings needing user input?";
-    "Findings needing user input?" -> "Batch questions and ask user" [label="yes"];
-    "Findings needing user input?" -> "Max passes reached?" [label="no"];
-    "Batch questions and ask user" -> "Apply user answers as fixes";
-    "Apply user answers as fixes" -> "Max passes reached?";
-    "Max passes reached?" -> "Generate final report" [label="yes — report unconverged"];
-    "Max passes reached?" -> "Run next review pass" [label="no"];
-    "Run next review pass" -> "Classify all findings by severity";
-    "Critical, High, or Medium found?" -> "Generate final report" [label="no — only Low/Info remain"];
-    "Generate final report" -> "Present report to user";
+    subgraph cluster_subagent {
+        label="REVIEW SUBAGENT (per pass)";
+        "Read full document" [shape=box];
+        "Review all applicable categories" [shape=box];
+        "Classify findings by severity" [shape=box];
+        "Apply user answers from prior pass (if any)" [shape=box];
+        "Auto-fix all fixable items" [shape=box];
+        "Return: pass stats, remaining questions, Low/Info items" [shape=box];
+    }
+
+    "Document provided" -> "Dispatch review subagent";
+    "Dispatch review subagent" -> "Read full document";
+    "Read full document" -> "Review all applicable categories";
+    "Review all applicable categories" -> "Classify findings by severity";
+    "Classify findings by severity" -> "Apply user answers from prior pass (if any)";
+    "Apply user answers from prior pass (if any)" -> "Auto-fix all fixable items";
+    "Auto-fix all fixable items" -> "Return: pass stats, remaining questions, Low/Info items";
+    "Return: pass stats, remaining questions, Low/Info items" -> "Receive subagent results";
+    "Receive subagent results" -> "Questions returned?";
+    "Questions returned?" -> "Ask user via AskUserQuestion" [label="yes"];
+    "Questions returned?" -> "Max passes reached?" [label="no — clean pass"];
+    "Ask user via AskUserQuestion" -> "Max passes reached?";
+    "Max passes reached?" -> "Compile final report from all pass data" [label="yes or clean pass"];
+    "Max passes reached?" -> "Dispatch next subagent (with answers)" [label="no"];
+    "Dispatch next subagent (with answers)" -> "Read full document";
+    "Compile final report from all pass data" -> "Present report to user";
 }
 ```
 
@@ -60,10 +72,10 @@ digraph review_loop {
 | **Critical** | Blocks implementation or creates serious risk. Missing requirements, contradictions, security holes. | Must fix |
 | **High** | Significant gap that will cause rework or confusion. Vague requirements, missing error flows, underdefined components. | Must fix |
 | **Medium** | Weakness that should be addressed. Missing edge cases, incomplete specs, unclear ownership. | Must fix |
-| **Low** | Minor improvement. Wording clarity, formatting, nice-to-haves. | Note in report only |
+| **Low** | Minor improvement. Wording clarity, formatting, nice-to-haves. | Fix alongside higher-severity items; leave unfixed only if no higher-severity items remain |
 | **Info** | Observation or suggestion. Not a deficiency. | Note in report only |
 
-**Exit criteria:** The loop ends when a pass produces ZERO Critical, High, or Medium findings.
+**Exit criteria:** The loop ends when a pass produces ZERO Critical, High, or Medium findings. Any Low items found in that final pass are noted in the report but do not trigger another pass. Low items found in earlier passes (alongside higher-severity items) should be fixed in that same pass.
 
 **Safety valve:** Default max passes is 5. If the user specifies a different limit (e.g., "max 3 passes"), use that instead. If the limit is reached without converging, stop and present the report with a note that the document may need structural rework before further review is productive.
 
@@ -128,19 +140,32 @@ Not everything should be auto-fixed. Some findings require user input because yo
 - Domain-specific logic you can't confidently infer from the document
 - Priority or sequencing decisions between competing concerns
 
-### Batched question flow
+### Subagent review pass
 
-When a pass produces findings that need user input:
-1. Complete the full review pass (don't stop mid-pass to ask)
-2. Auto-fix everything you can
-3. Collect all ask-the-user items into a single batch
-4. Present the batch to the user using the AskUserQuestion tool (or as a numbered list if many items)
-5. Apply the user's answers as fixes
-6. Continue to the next review pass
+Each review pass is dispatched as a subagent with this prompt structure:
+1. **Document path** — the file to review
+2. **User answers** (if any) — answers from the prior pass's questions, to apply as fixes before reviewing
+3. **Pass number** — for tracking
+4. **Instructions** — review all applicable categories, classify findings, apply user answers, auto-fix what you can, return structured results
+
+The subagent must return a structured response containing:
+- **Pass stats** — counts by severity (Critical, High, Medium, Low, Info)
+- **Auto-fixes applied** — bulleted summary of what was changed
+- **Questions for user** — items needing user input, each with context and suggested options
+- **Remaining Low/Info items** — noted but not blocking
+
+### Main conversation flow
+
+The main conversation orchestrates the loop:
+1. Dispatch review subagent (pass 1)
+2. Receive results — if questions were returned, ask the user via AskUserQuestion and **wait for answers**
+3. If no Critical/High/Medium remain and no questions: exit loop, compile final report
+4. Otherwise: dispatch next subagent with user answers + pass number
+5. Repeat until clean or max passes reached
 
 ## Final Report Format
 
-After the loop exits, present this report:
+After the loop exits, the main conversation compiles the final report from all subagent pass data:
 
 ```
 ## Document Review Report
