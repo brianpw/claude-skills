@@ -17,6 +17,8 @@ Systematically review a document through repeated passes, fixing ALL issues foun
 
 **Do NOT use for:** Code reviews, changelogs, single-paragraph user stories, meeting notes, or documents shorter than ~half a page. Those don't benefit from iterative multi-pass review.
 
+**Unsupported inputs:** The skill operates on a local, plain-text markdown document the subagent can read and edit with standard file tools. It does not handle URLs (fetch the page first), binary formats (`.docx`, `.pdf`, `.pptx` — convert to markdown first), or multi-file document sets (consolidate into a single file first). Attempting to run it on these will either error or produce garbage.
+
 ## Process
 
 Review passes run as **subagents**; the main conversation coordinates the loop and handles user interaction.
@@ -26,7 +28,9 @@ flowchart TD
   subgraph MAIN["MAIN CONVERSATION"]
     A([Document provided]) --> B[Dispatch review subagent]
     B --> C[Receive subagent results]
-    C --> D{Critical/High/Medium = 0?}
+    C --> FE{fix_errors empty?}
+    FE -- no --> SURF[Surface errors to user, halt loop]
+    FE -- yes --> D{Critical/High/Medium = 0?}
     D -- yes --> G[Compile final report]
     D -- no --> Q{Questions returned?}
     Q -- yes --> E[Ask user via AskUserQuestion]
@@ -59,6 +63,47 @@ Each review pass is dispatched as a subagent with:
 - **Recommended model + effort:** `model: opus`, `effort: high`. Review classification is judgment-heavy; weaker models or lower effort systematically under-classify findings. If Opus is unavailable, fall back to Sonnet with `effort: high` and note the limitation in the final report.
 - **Extended thinking:** Enable thinking for classification reasoning — reviewers under-classify without it, and thinking budget should scale with document size.
 - **Isolation:** Each pass runs in a fresh subagent context. This is deliberate: fresh context prevents the reviewer from rationalizing past decisions and catches cascading issues.
+
+#### Dispatch prompt template
+
+The YAML-only response contract is strong but only works if the dispatch prompt enforces it up front. Use this template as the subagent's instructions, filling in the four placeholders:
+
+```
+YOUR OUTPUT CONTRACT — READ BEFORE ANYTHING ELSE
+
+Your entire final response to me MUST be a single fenced YAML block that
+conforms to the schema at the end of these instructions. No preamble. No
+trailing prose. No "Here is the review:" header. No summary after the
+YAML. Output ONLY the YAML block, starting with ```yaml and ending with
+```.
+
+If you cannot complete the review (tool error, file unreadable, etc.),
+still return the YAML block with the error described in `fix_errors`.
+Never return a natural-language explanation in place of YAML.
+
+--- TASK ---
+
+Document path: {{DOCUMENT_PATH}}
+Pass number: {{PASS_NUMBER}}
+User answers from prior pass (apply these as fixes before reviewing):
+{{USER_ANSWERS_OR_NONE}}
+Declined questions (do NOT re-ask these):
+{{DECLINED_QUESTIONS_OR_NONE}}
+
+Review all applicable categories from the iterative-document-review
+skill. Classify every finding by severity. Auto-fix everything you have
+context for using Edit/Write. Batch any stakeholder questions. Follow
+the Low-severity rule: fix alongside higher-severity work; skip if the
+pass would otherwise be clean.
+
+--- OUTPUT SCHEMA (your ONLY output) ---
+
+[paste the YAML schema from "Subagent response schema" below]
+```
+
+Claude subagents default to narrating their work. Without an explicit,
+upfront contract like this, they will return prose and break the
+orchestration loop. Treat this template as load-bearing.
 
 ### Tracking progress
 
@@ -99,7 +144,7 @@ For documents over ~20K tokens (roughly 30+ pages), pass 1 MAY fan out parallel 
 
 Fixes can introduce new issues. Watch for these patterns:
 
-- **Oscillation** — If pass N fixes something and pass N+K flags the same area again, do NOT revert. Flag it as `[REVIEW NOTE: revised in pass N, may need stakeholder alignment]` and classify as Info so it doesn't block the loop.
+- **Oscillation** — If pass N fixes something and pass N+K flags the same area again, do NOT revert. Flag it as `[REVIEW NOTE: revised in pass N, may need stakeholder alignment]` and classify as Info so it doesn't block the loop. **Exception:** if pass N's `fix_errors` included the fix, it never landed — the next-pass recurrence is not oscillation, it's a retry target. Retry the fix or escalate.
 - **Rising issue count** — If a pass produces MORE Critical/High/Medium findings than the prior pass, your fixes are too aggressive. Switch to smaller, targeted fixes instead of adding large new sections.
 - **Same finding recurring** — If the exact same finding appears in two consecutive passes (you fixed it, it came back), flag it `[REVIEW NOTE]` and downgrade to Info. Don't keep fixing the same thing.
 
@@ -177,6 +222,10 @@ pass_stats:
 auto_fixes:
   - "Added retry/backoff spec to payment webhook section"
   - "Resolved SLA contradiction (standardized on 500ms)"
+fix_errors:  # populate when an Edit/Write tool call failed; leave [] on success
+  - finding: "Missing monitoring section"
+    attempted: "Append new section after section 8"
+    error: "Edit failed: old_string not found (document was modified between Read and Edit)"
 questions_for_user:
   - question: "What's the retention window for audit logs?"
     context: "Section 6 requires audit logging but never specifies retention."
@@ -198,10 +247,11 @@ If the orchestrator receives a response that isn't valid YAML matching this sche
 ### Main conversation flow
 
 1. Dispatch review subagent (pass 1).
-2. Receive YAML results. If `pass_stats.critical + high + medium == 0`, exit loop and compile the final report.
-3. If `questions_for_user` is non-empty, call `AskUserQuestion` with up to 4 questions and **wait for answers**. Questions the user declines (or answers "none of the above") become unresolved — record them for the next subagent dispatch and continue; do not block the loop.
-4. If max passes reached, exit loop and compile the final report with `INCOMPLETE` status.
-5. Otherwise dispatch the next subagent with: user answers, declined-question list, pass number, and the document path. Return to step 2.
+2. Receive YAML results. If `fix_errors` is non-empty, surface them to the user immediately as a blocker — these are failed edits, not classification issues, and continuing would silently spin the loop on unfixed findings. Do not treat a recurrence of the same finding in the next pass as oscillation if the original fix errored out.
+3. If `pass_stats.critical + high + medium == 0` and `fix_errors` is empty, exit loop and compile the final report.
+4. If `questions_for_user` is non-empty, call `AskUserQuestion` with up to 4 questions and **wait for answers**. Questions the user declines (or answers "none of the above") become unresolved — record them for the next subagent dispatch and continue; do not block the loop.
+5. If max passes reached, exit loop and compile the final report with `INCOMPLETE` status.
+6. Otherwise dispatch the next subagent with: user answers, declined-question list, pass number, and the document path. Return to step 2.
 
 ## Final Report Format
 
