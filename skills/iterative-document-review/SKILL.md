@@ -28,9 +28,7 @@ flowchart TD
   subgraph MAIN["MAIN CONVERSATION"]
     A([Document provided]) --> B[Dispatch review subagent]
     B --> C[Receive subagent results]
-    C --> FE{fix_errors empty?}
-    FE -- no --> SURF[Surface errors to user, halt loop]
-    FE -- yes --> D{Critical/High/Medium = 0?}
+    C --> D{Critical/High/Medium = 0?}
     D -- yes --> G[Compile final report]
     D -- no --> Q{Questions returned?}
     Q -- yes --> E[Ask user via AskUserQuestion]
@@ -66,9 +64,9 @@ Each review pass is dispatched as a subagent with:
 
 #### Dispatch prompt template
 
-The YAML-only response contract is strong but only works if the dispatch prompt enforces it up front. Use this template as the subagent's instructions, filling in the four placeholders:
+The YAML-only response contract is strong but only works if the dispatch prompt enforces it up front. Use this template as the subagent's instructions, filling in the four `{{PLACEHOLDERS}}`:
 
-```
+````
 YOUR OUTPUT CONTRACT — READ BEFORE ANYTHING ELSE
 
 Your entire final response to me MUST be a single fenced YAML block that
@@ -98,8 +96,31 @@ pass would otherwise be clean.
 
 --- OUTPUT SCHEMA (your ONLY output) ---
 
-[paste the YAML schema from "Subagent response schema" below]
+```yaml
+pass_stats:
+  critical: 0
+  high: 0
+  medium: 0
+  low: 0
+  info: 0
+auto_fixes:
+  - "Short description of each fix applied"
+fix_errors:  # leave [] on success; populate on any Edit/Write failure
+  - finding: "What the failed fix was addressing"
+    attempted: "What change the subagent tried to make"
+    error: "Exact tool error message"
+questions_for_user:  # up to 4; each with 2-4 concrete options
+  - question: "One-line question"
+    context: "Why you need this to proceed"
+    options:
+      - "Concrete option A"
+      - "Concrete option B"
+remaining_low:
+  - "Low-severity findings deferred this pass"
+remaining_info:
+  - "Info-level observations, not deficiencies"
 ```
+````
 
 Claude subagents default to narrating their work. Without an explicit,
 upfront contract like this, they will return prose and break the
@@ -108,10 +129,6 @@ orchestration loop. Treat this template as load-bearing.
 ### Tracking progress
 
 Before dispatching pass 1, create a single `TaskCreate` task titled "Document review (converging)" and update its description after each pass with the current pass number and issue counts (e.g., "Pass 2 complete — 3 High, 5 Medium remaining"). Mark it `completed` once the loop exits. A single evolving task beats N upfront placeholder tasks: you don't know in advance how many passes will run, and orphaned "Pass 4" and "Pass 5" tasks on an early-converging review create visual clutter.
-
-### Long-document fanout (optional)
-
-For documents over ~20K tokens (roughly 30+ pages), pass 1 MAY fan out parallel subagents — one per top-level section — that each return findings without fixing. The main conversation consolidates their findings, dispatches a normal serial subagent to apply fixes, then resumes the standard serial loop from pass 2. Do NOT fan out after pass 1; fixes create cross-section dependencies that parallel reviewers can't see.
 
 ## Severity Levels
 
@@ -144,7 +161,7 @@ For documents over ~20K tokens (roughly 30+ pages), pass 1 MAY fan out parallel 
 
 Fixes can introduce new issues. Watch for these patterns:
 
-- **Oscillation** — If pass N fixes something and pass N+K flags the same area again, do NOT revert. Flag it as `[REVIEW NOTE: revised in pass N, may need stakeholder alignment]` and classify as Info so it doesn't block the loop. **Exception:** if pass N's `fix_errors` included the fix, it never landed — the next-pass recurrence is not oscillation, it's a retry target. Retry the fix or escalate.
+- **Oscillation** — If pass N fixes something and pass N+K flags the same area again, do NOT revert. Flag it as `[REVIEW NOTE: revised in pass N, may need stakeholder alignment]` and classify as Info so it doesn't block the loop. **Exception:** if pass N's `fix_errors` included the fix, it never landed — the next-pass recurrence is not oscillation, it's a retry. The next subagent should reattempt the fix. Escalate only if the same fix_error recurs in two consecutive passes.
 - **Rising issue count** — If a pass produces MORE Critical/High/Medium findings than the prior pass, your fixes are too aggressive. Switch to smaller, targeted fixes instead of adding large new sections.
 - **Same finding recurring** — If the exact same finding appears in two consecutive passes (you fixed it, it came back), flag it `[REVIEW NOTE]` and downgrade to Info. Don't keep fixing the same thing.
 
@@ -237,9 +254,6 @@ remaining_low:
   - "Heading case inconsistency in section 4"
 remaining_info:
   - "Section ordering is chronological rather than by subsystem"
-unresolved_questions:  # populated when user declined a prior-pass question
-  - question: "What's the retention window for audit logs?"
-    reason: "User declined to answer in pass 2"
 ```
 
 If the orchestrator receives a response that isn't valid YAML matching this schema, it should dispatch the same subagent again with an instruction to re-emit its findings in the specified format. Do not guess at fields.
@@ -247,11 +261,11 @@ If the orchestrator receives a response that isn't valid YAML matching this sche
 ### Main conversation flow
 
 1. Dispatch review subagent (pass 1).
-2. Receive YAML results. If `fix_errors` is non-empty, surface them to the user immediately as a blocker — these are failed edits, not classification issues, and continuing would silently spin the loop on unfixed findings. Do not treat a recurrence of the same finding in the next pass as oscillation if the original fix errored out.
-3. If `pass_stats.critical + high + medium == 0` and `fix_errors` is empty, exit loop and compile the final report.
+2. Receive YAML results. If `fix_errors` is non-empty, note them as **retry targets** for the next subagent dispatch and include them in the final report's "Items Requiring Stakeholder Input" section. Do not halt the loop on fix_errors — they are edit-tool failures, not classification issues, and a retry in the next pass often succeeds. If the **same** fix_error recurs in two consecutive passes, escalate: surface to the user and stop retrying that specific fix.
+3. If `pass_stats.critical + high + medium == 0`, exit loop and compile the final report.
 4. If `questions_for_user` is non-empty, call `AskUserQuestion` with up to 4 questions and **wait for answers**. Questions the user declines (or answers "none of the above") become unresolved — record them for the next subagent dispatch and continue; do not block the loop.
 5. If max passes reached, exit loop and compile the final report with `INCOMPLETE` status.
-6. Otherwise dispatch the next subagent with: user answers, declined-question list, pass number, and the document path. Return to step 2.
+6. Otherwise dispatch the next subagent with: user answers, declined-question list, fix_errors to retry, pass number, and the document path. Return to step 2.
 
 ## Final Report Format
 
