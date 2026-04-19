@@ -6,14 +6,13 @@
   },
   "metadata": {
     "description": "Claude Code skills for structured document review and related product-engineering workflows.",
-    "version": "0.3.0"
+    "version": "0.3.1"
   },
   "plugins": [
     {
       "name": "iterative-document-review",
       "source": "./",
       "description": "Multi-pass, converge-to-clean review of specs, PRDs, RFCs, architecture docs, and similar structured documents.",
-      "version": "0.3.0",
       "category": "review",
       "tags": ["document-review", "specs", "prd", "rfc", "quality"]
     }
