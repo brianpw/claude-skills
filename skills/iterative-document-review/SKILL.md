@@ -26,12 +26,14 @@ flowchart TD
   subgraph MAIN["MAIN CONVERSATION"]
     A([Document provided]) --> B[Dispatch review subagent]
     B --> C[Receive subagent results]
-    C --> D{Questions returned?}
-    D -- yes --> E[Ask user via AskUserQuestion]
-    D -- no, clean pass --> F{Max passes reached?}
+    C --> D{Critical/High/Medium = 0?}
+    D -- yes --> G[Compile final report]
+    D -- no --> Q{Questions returned?}
+    Q -- yes --> E[Ask user via AskUserQuestion]
+    Q -- no --> F{Max passes reached?}
     E --> F
-    F -- yes or clean pass --> G[Compile final report]
-    F -- no --> H[Dispatch next subagent with answers]
+    F -- yes --> G
+    F -- no --> H[Dispatch next subagent with user answers]
     G --> I([Present report to user])
   end
 
@@ -54,12 +56,13 @@ Each review pass is dispatched as a subagent with:
 
 - **Agent type:** `general-purpose` (or any agent with file read/write/edit tools)
 - **Required tools:** `Read`, `Edit`, `Write`, `Grep`, `Glob`
-- **Extended thinking:** Enable thinking for classification reasoning — reviewers systematically under-classify without it
-- **Isolation:** Each pass runs in a fresh subagent context. This is deliberate: fresh context prevents the reviewer from rationalizing past decisions and catches cascading issues
+- **Recommended model + effort:** `model: opus`, `effort: high`. Review classification is judgment-heavy; weaker models or lower effort systematically under-classify findings. If Opus is unavailable, fall back to Sonnet with `effort: high` and note the limitation in the final report.
+- **Extended thinking:** Enable thinking for classification reasoning — reviewers under-classify without it, and thinking budget should scale with document size.
+- **Isolation:** Each pass runs in a fresh subagent context. This is deliberate: fresh context prevents the reviewer from rationalizing past decisions and catches cascading issues.
 
 ### Tracking progress
 
-Use `TaskCreate` to create one task per planned pass (e.g., "Pass 1", "Pass 2"…) before the loop starts. `TaskUpdate` each pass to `in_progress`/`completed` as the loop runs. This gives the user real-time visibility into where the review stands without needing narration between passes.
+Before dispatching pass 1, create a single `TaskCreate` task titled "Document review (converging)" and update its description after each pass with the current pass number and issue counts (e.g., "Pass 2 complete — 3 High, 5 Medium remaining"). Mark it `completed` once the loop exits. A single evolving task beats N upfront placeholder tasks: you don't know in advance how many passes will run, and orphaned "Pass 4" and "Pass 5" tasks on an early-converging review create visual clutter.
 
 ### Long-document fanout (optional)
 
@@ -152,13 +155,17 @@ When fixing, edit the document directly:
 - Domain-specific logic you can't confidently infer
 - Priority/sequencing between competing concerns
 
+**Tiebreaker when in doubt:** prefer asking over fixing. A wrong spec that looks authoritative is worse than a clear question — it ships as truth and gets implemented. A question costs one round-trip; a wrong fix costs downstream rework.
+
 ### Returning questions to the main conversation
 
 Questions flow: **subagent → main conversation → `AskUserQuestion` tool → user**. The main conversation is subject to `AskUserQuestion`'s constraints, so subagents must produce output that maps cleanly.
 
 Per batch, the subagent should return **at most 4 questions**, each with **2–4 discrete options**. If the subagent produces more findings than fit, it must prioritize by severity (Critical/High first) and defer the rest to subsequent passes. Each option should be a concrete choice (e.g., "Retain legacy API v1 through EOY 2026", "Deprecate on next release") — not free-text prompts.
 
-Subagent response format:
+The subagent's **entire final message back to the orchestrator** MUST be a single fenced YAML block matching the schema below — no preamble, no trailing explanation, no additional prose or markdown. The main conversation parses this block to decide the next action; anything else breaks the loop.
+
+Subagent response schema:
 
 ```yaml
 pass_stats:
@@ -177,17 +184,24 @@ questions_for_user:
       - "30 days"
       - "1 year"
       - "7 years (compliance default)"
-remaining_low_info:
-  - "Heading case inconsistency in section 4 (Low)"
+remaining_low:
+  - "Heading case inconsistency in section 4"
+remaining_info:
+  - "Section ordering is chronological rather than by subsystem"
+unresolved_questions:  # populated when user declined a prior-pass question
+  - question: "What's the retention window for audit logs?"
+    reason: "User declined to answer in pass 2"
 ```
+
+If the orchestrator receives a response that isn't valid YAML matching this schema, it should dispatch the same subagent again with an instruction to re-emit its findings in the specified format. Do not guess at fields.
 
 ### Main conversation flow
 
 1. Dispatch review subagent (pass 1).
-2. Receive results. If `questions_for_user` is non-empty, call `AskUserQuestion` with up to 4 questions and **wait for answers**.
-3. If no Critical/High/Medium remain and no questions: exit loop, compile final report.
-4. Otherwise: dispatch next subagent with user answers + pass number.
-5. Repeat until clean or max passes reached.
+2. Receive YAML results. If `pass_stats.critical + high + medium == 0`, exit loop and compile the final report.
+3. If `questions_for_user` is non-empty, call `AskUserQuestion` with up to 4 questions and **wait for answers**. Questions the user declines (or answers "none of the above") become unresolved — record them for the next subagent dispatch and continue; do not block the loop.
+4. If max passes reached, exit loop and compile the final report with `INCOMPLETE` status.
+5. Otherwise dispatch the next subagent with: user answers, declined-question list, pass number, and the document path. Return to step 2.
 
 ## Final Report Format
 
@@ -208,8 +222,11 @@ After the loop exits, the main conversation compiles the report from all subagen
 | 2    | ...         | ...      | ...  | ...    | ... | ...  |
 | N    | 0 actionable| 0        | 0    | 0      | ... | ...  |
 
-### Remaining Low/Info Items
-- [List any Low or Info items from the final pass]
+### Remaining Low Items
+- [Low-severity findings from the final pass — minor improvements, not blockers]
+
+### Observations (Info)
+- [Info items from the final pass — non-actionable observations]
 
 ### Key Changes Made
 - [Bulleted summary of the most significant fixes applied across passes]
