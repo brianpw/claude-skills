@@ -4,13 +4,16 @@
     "name": "brianpw",
     "url": "https://github.com/brianpw"
   },
-  "description": "Claude Code skills for structured document review and related product-engineering workflows.",
+  "metadata": {
+    "description": "Claude Code skills for structured document review and related product-engineering workflows.",
+    "version": "0.3.0"
+  },
   "plugins": [
     {
       "name": "iterative-document-review",
       "source": "./",
       "description": "Multi-pass, converge-to-clean review of specs, PRDs, RFCs, architecture docs, and similar structured documents.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "review",
       "tags": ["document-review", "specs", "prd", "rfc", "quality"]
     }
