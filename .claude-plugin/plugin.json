@@ -1,0 +1,21 @@
+{
+  "name": "iterative-document-review",
+  "version": "0.2.0",
+  "description": "Claude Code skill for multi-pass, converge-to-clean review of specs, PRDs, RFCs, architecture docs, and similar structured documents.",
+  "author": {
+    "name": "brianpw"
+  },
+  "repository": "https://github.com/brianpw/claude-skills",
+  "license": "MIT",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "skill",
+    "document-review",
+    "specification",
+    "prd",
+    "rfc",
+    "quality"
+  ],
+  "homepage": "https://github.com/brianpw/claude-skills#readme"
+}
