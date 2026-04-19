@@ -26,7 +26,7 @@ git clone https://github.com/brianpw/claude-skills.git
 Copy-Item -Recurse claude-skills/skills/iterative-document-review $env:USERPROFILE/.claude/skills/
 ```
 
-The skill will be discovered on Claude Code's next start. Verify with `/skill` or by asking Claude to list available skills.
+The skill will be discovered on Claude Code's next start. Verify by asking Claude to list its available skills.
 
 ## Using iterative-document-review
 
