@@ -40,10 +40,10 @@ flowchart TD
   end
 
   subgraph SUB["REVIEW SUBAGENT (per pass)"]
-    S1[Read full document] --> S2[Review all applicable categories]
+    S1[Read full document] --> S4[Apply user answers from prior pass]
+    S4 --> S2[Review all applicable categories]
     S2 --> S3[Classify findings by severity]
-    S3 --> S4[Apply user answers from prior pass]
-    S4 --> S5[Auto-fix all fixable items]
+    S3 --> S5[Auto-fix all fixable items]
     S5 --> S6[Return pass stats, questions, Low/Info]
   end
 
@@ -67,6 +67,8 @@ Each review pass is dispatched as a subagent with:
 The YAML-only response contract is strong but only works if the dispatch prompt enforces it up front. Use this template as the subagent's instructions, filling in the four `{{PLACEHOLDERS}}`:
 
 ````
+ultrathink
+
 YOUR OUTPUT CONTRACT — READ BEFORE ANYTHING ELSE
 
 Your entire final response to me MUST be a single fenced YAML block that
@@ -225,9 +227,9 @@ Questions flow: **subagent → main conversation → `AskUserQuestion` tool → 
 
 Per batch, the subagent should return **at most 4 questions**, each with **2–4 discrete options**. If the subagent produces more findings than fit, it must prioritize by severity (Critical/High first) and defer the rest to subsequent passes. Each option should be a concrete choice (e.g., "Retain legacy API v1 through EOY 2026", "Deprecate on next release") — not free-text prompts.
 
-The subagent's **entire final message back to the orchestrator** MUST be a single fenced YAML block matching the schema below — no preamble, no trailing explanation, no additional prose or markdown. The main conversation parses this block to decide the next action; anything else breaks the loop.
+The subagent's **entire final message back to the orchestrator** MUST be a single fenced YAML block matching the schema defined in the **Dispatch prompt template** above — no preamble, no trailing explanation, no additional prose or markdown. The main conversation parses this block to decide the next action; anything else breaks the loop.
 
-Subagent response schema:
+Example of a well-formed response (values illustrative only — see the dispatch template for the normative schema):
 
 ```yaml
 pass_stats:
@@ -239,7 +241,7 @@ pass_stats:
 auto_fixes:
   - "Added retry/backoff spec to payment webhook section"
   - "Resolved SLA contradiction (standardized on 500ms)"
-fix_errors:  # populate when an Edit/Write tool call failed; leave [] on success
+fix_errors:
   - finding: "Missing monitoring section"
     attempted: "Append new section after section 8"
     error: "Edit failed: old_string not found (document was modified between Read and Edit)"
@@ -256,12 +258,12 @@ remaining_info:
   - "Section ordering is chronological rather than by subsystem"
 ```
 
-If the orchestrator receives a response that isn't valid YAML matching this schema, it should dispatch the same subagent again with an instruction to re-emit its findings in the specified format. Do not guess at fields.
+If the orchestrator receives a response that isn't valid YAML matching the dispatch-template schema, it should dispatch the same subagent again with an instruction to re-emit its findings in the specified format. Do not guess at fields.
 
 ### Main conversation flow
 
 1. Dispatch review subagent (pass 1).
-2. Receive YAML results. If `fix_errors` is non-empty, note them as **retry targets** for the next subagent dispatch and include them in the final report's "Items Requiring Stakeholder Input" section. Do not halt the loop on fix_errors — they are edit-tool failures, not classification issues, and a retry in the next pass often succeeds. If the **same** fix_error recurs in two consecutive passes, escalate: surface to the user and stop retrying that specific fix.
+2. Receive YAML results. If `fix_errors` is non-empty, note them as **retry targets** for the next subagent dispatch and record them for the final report's "Fix Failures" section. Do not halt the loop on fix_errors — they are edit-tool failures, not classification issues, and a retry in the next pass often succeeds. If the **same** fix_error recurs in two consecutive passes, escalate: surface to the user and stop retrying that specific fix.
 3. If `pass_stats.critical + high + medium == 0`, exit loop and compile the final report.
 4. If `questions_for_user` is non-empty, call `AskUserQuestion` with up to 4 questions and **wait for answers**. Questions the user declines (or answers "none of the above") become unresolved — record them for the next subagent dispatch and continue; do not block the loop.
 5. If max passes reached, exit loop and compile the final report with `INCOMPLETE` status.
@@ -294,6 +296,9 @@ After the loop exits, the main conversation compiles the report from all subagen
 
 ### Key Changes Made
 - [Bulleted summary of the most significant fixes applied across passes]
+
+### Fix Failures
+- [Edit/Write failures that recurred across two consecutive passes and were escalated — include the finding, the attempted change, and the exact error. Omit this section if empty.]
 
 ### Items Requiring Stakeholder Input
 - [REVIEW NOTE items: oscillation flags, recurring findings, unresolved questions]
